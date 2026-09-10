@@ -1,0 +1,77 @@
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import GetAssetsRequest
+from alpaca.trading.enums import AssetClass, AssetStatus
+import pandas as pd
+import config as cfg
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+import os
+
+def get_asset_universe():
+    client = TradingClient(cfg.ALPACA_KEY, cfg.ALPACA_SECRET, paper=True)
+    assets = client.get_all_assets(
+        GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
+    )
+    rows = [{
+        "symbol": a.symbol,
+        "exchange": a.exchange.value,
+        "tradable": a.tradable,
+        "shortable": a.shortable,
+        "easy_to_borrow": a.easy_to_borrow,
+        "fractionable": a.fractionable,
+    } for a in assets]
+    df = pd.DataFrame(rows)
+    # keep common exchanges, tradable names; exclude the obvious non-common-stock junk later
+    df = df[df.tradable & df.exchange.isin(["NYSE", "NASDAQ", "ARCA", "AMEX"])]
+    return df.reset_index(drop=True)
+
+def download_bars(symbols):
+    client = StockHistoricalDataClient(cfg.ALPACA_KEY, cfg.ALPACA_SECRET)
+    frames = []
+    for i in range(0, len(symbols), 200):          # chunk to stay under limits
+        chunk = symbols[i:i+200]
+        req = StockBarsRequest(
+            symbol_or_symbols=chunk,
+            timeframe=TimeFrame.Day,
+            start=cfg.START,
+            end=cfg.END,
+            adjustment="all",                        # split + dividend adjusted
+        )
+        bars = client.get_stock_bars(req).df         # MultiIndex (symbol, timestamp)
+        frames.append(bars)
+        print(f"{i+len(chunk)}/{len(symbols)} symbols")
+    df = pd.concat(frames).reset_index()
+    os.makedirs(cfg.DATA_DIR, exist_ok=True)
+    df.to_parquet(f"{cfg.DATA_DIR}/bars.parquet")
+    return df
+
+def build_asof_universe(bars, assets, rebalance="ME"):
+    bars = bars.copy()
+    bars["timestamp"] = pd.to_datetime(bars["timestamp"]).dt.tz_localize(None)
+    bars["dollar_vol"] = bars["close"] * bars["volume"]
+
+    dates = pd.date_range(bars.timestamp.min(), bars.timestamp.max(), freq=rebalance)
+    shortable = set(assets.loc[assets.shortable, "symbol"])
+
+    out = []
+    for dt in dates:
+        # STRICT: only bars on or before the rebalance date
+        hist = bars[bars.timestamp <= dt]
+        recent = hist[hist.timestamp > dt - pd.Timedelta(days=cfg.ADV_WINDOW * 2)]
+
+        adv = recent.groupby("symbol")["dollar_vol"].median()
+        last_px = hist.sort_values("timestamp").groupby("symbol")["close"].last()
+
+        elig = pd.DataFrame({"adv": adv, "price": last_px}).dropna()
+        elig = elig[elig.price >= cfg.MIN_PRICE]
+        elig = elig.nlargest(cfg.UNIVERSE_SIZE, "adv")
+
+        elig = elig.reset_index()
+        elig["date"] = dt
+        elig["shortable"] = elig.symbol.isin(shortable)
+        out.append(elig[["date", "symbol", "price", "adv", "shortable"]])
+
+    universe = pd.concat(out, ignore_index=True)
+    universe.to_parquet(f"{cfg.DATA_DIR}/universe.parquet")
+    return universe
