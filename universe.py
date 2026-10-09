@@ -26,7 +26,9 @@ def get_asset_universe():
     df = df[df.tradable & df.exchange.isin(["NYSE", "NASDAQ", "ARCA", "AMEX"])]
     return df.reset_index(drop=True)
 
-def download_bars(symbols):
+def download_bars(symbols, start=None, end=None, out_path=None):
+    start = start or cfg.START
+    end = end or cfg.END
     client = StockHistoricalDataClient(cfg.ALPACA_KEY, cfg.ALPACA_SECRET)
     frames = []
     for i in range(0, len(symbols), 200):          # chunk to stay under limits
@@ -34,24 +36,27 @@ def download_bars(symbols):
         req = StockBarsRequest(
             symbol_or_symbols=chunk,
             timeframe=TimeFrame.Day,
-            start=cfg.START,
-            end=cfg.END,
+            start=start,
+            end=end,
             adjustment="all",                        # split + dividend adjusted
         )
         bars = client.get_stock_bars(req).df         # MultiIndex (symbol, timestamp)
-        frames.append(bars)
+        if len(bars):
+            frames.append(bars)
         print(f"{i+len(chunk)}/{len(symbols)} symbols")
     df = pd.concat(frames).reset_index()
-    os.makedirs(cfg.DATA_DIR, exist_ok=True)
-    df.to_parquet(f"{cfg.DATA_DIR}/bars.parquet")
+    if out_path:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        df.to_parquet(out_path)
     return df
 
-def build_asof_universe(bars, assets, rebalance="ME"):
+def build_asof_universe(bars, assets, rebalance="ME", dates=None, out_path=None):
     bars = bars.copy()
     bars["timestamp"] = pd.to_datetime(bars["timestamp"]).dt.tz_localize(None)
     bars["dollar_vol"] = bars["close"] * bars["volume"]
 
-    dates = pd.date_range(bars.timestamp.min(), bars.timestamp.max(), freq=rebalance)
+    if dates is None:
+        dates = pd.date_range(bars.timestamp.min(), bars.timestamp.max(), freq=rebalance)
     shortable = set(assets.loc[assets.shortable, "symbol"])
 
     out = []
@@ -73,5 +78,7 @@ def build_asof_universe(bars, assets, rebalance="ME"):
         out.append(elig[["date", "symbol", "price", "adv", "shortable"]])
 
     universe = pd.concat(out, ignore_index=True)
-    universe.to_parquet(f"{cfg.DATA_DIR}/universe.parquet")
+    if out_path:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        universe.to_parquet(out_path)
     return universe

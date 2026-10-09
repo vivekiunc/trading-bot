@@ -25,6 +25,7 @@ def build_features(bars, universe):
         f["mom_12_1"]    = (1 + r.iloc[:-21]).prod() - 1
         f["reversal_1m"] = (1 + r.tail(21)).prod() - 1
         f["vol_3m"]      = r.tail(63).std()
+        f["vol_3m_raw"]  = f["vol_3m"]          # kept un-ranked, for position sizing
         m = mkt.loc[r.index]
         f["beta"]        = r.apply(lambda c: c.cov(m) / m.var())
         f["illiq"]       = r.tail(63).abs().mean()
